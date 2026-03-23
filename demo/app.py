@@ -1,6 +1,12 @@
 import logging
 import os
+import sys
 from typing import Any
+
+# Allow running as `python demo/app.py` (or `uv run demo/app.py`)
+_REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
 
 import gradio as gr
 import numpy as np
