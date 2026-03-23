@@ -132,6 +132,56 @@ def _coerce_attention_tensor(attn_layer: Any) -> torch.Tensor | None:
     return None
 
 
+def _coerce_output_to_tokens(out: Any) -> torch.Tensor | None:
+    """Extract (B, seq, D) tokens from a HF output object/dict/tuple."""
+    if isinstance(out, torch.Tensor):
+        return out
+    if hasattr(out, "last_hidden_state") and isinstance(out.last_hidden_state, torch.Tensor):
+        return out.last_hidden_state
+    if isinstance(out, dict):
+        v = out.get("last_hidden_state")
+        if isinstance(v, torch.Tensor):
+            return v
+    if isinstance(out, (tuple, list)) and out and isinstance(out[0], torch.Tensor):
+        return out[0]
+    return None
+
+
+def _tokens_to_saliency_map(video_tensor: torch.Tensor, tokens: torch.Tensor) -> np.ndarray:
+    """Fallback: derive a per-patch saliency map from token embedding norms.
+
+    Returns (T, H, W) map in [0,1].
+    """
+    if tokens.ndim != 3:
+        raise ValueError(f"Expected tokens shape (B, seq, D); got {tuple(tokens.shape)}")
+    if tokens.shape[0] != 1:
+        raise ValueError("Only batch size 1 supported.")
+
+    seq_len = int(tokens.shape[1])
+    t = int(video_tensor.shape[2])
+
+    # Infer CLS by whichever option yields a valid patch grid.
+    has_cls = False
+    try:
+        _t, hp, wp = _infer_patch_grid(video_tensor, seq_len, has_cls=True)
+        has_cls = True
+    except Exception:
+        _t, hp, wp = _infer_patch_grid(video_tensor, seq_len, has_cls=False)
+        has_cls = False
+
+    start = 1 if has_cls else 0
+    patch_tokens = tokens[0, start:, :]  # (T*hp*wp, D)
+    sal = patch_tokens.float().pow(2).sum(dim=-1).sqrt()  # L2 norm (T*hp*wp,)
+    sal = sal.reshape(_t, hp, wp)
+
+    h = int(video_tensor.shape[3])
+    w = int(video_tensor.shape[4])
+    up = F.interpolate(sal.unsqueeze(1), size=(h, w), mode="bilinear", align_corners=False).squeeze(1)
+    up = up - up.min()
+    up = up / up.max().clamp_min(1e-8)
+    return up.detach().float().cpu().numpy()
+
+
 def _storage_keys_in_order(hook_storage: dict[str, Any]) -> list[str]:
     # Preserve insertion order (matches forward execution order better than sorting).
     return [k for k in hook_storage.keys() if k != META_KEY]
@@ -393,7 +443,36 @@ def extract_attention_maps(
             attn_raw = attentions[_resolve_layer_idx(layer_idx, len(attentions))]
             attn = _coerce_attention_tensor(attn_raw)
             if attn is None:
-                raise RuntimeError("Model returned attentions but could not coerce selected layer to a Tensor.")
+                # Some models return `None` attentions even when requested (e.g., flash attention).
+                # Fall back to a token-norm saliency map rather than failing hard.
+                try:
+                    tokens = _coerce_output_to_tokens(out)
+                except Exception:
+                    tokens = None
+                if tokens is None:
+                    raise RuntimeError("Model returned attentions but could not coerce selected layer to a Tensor.")
+
+                sal_map = _tokens_to_saliency_map(video_tensor, tokens)
+                # Best-effort meta
+                seq_len = int(tokens.shape[1])
+                try:
+                    _t, hp, wp = _infer_patch_grid(video_tensor, seq_len, has_cls=True)
+                    has_cls = True
+                except Exception:
+                    _t, hp, wp = _infer_patch_grid(video_tensor, seq_len, has_cls=False)
+                    has_cls = False
+                hook_storage[META_KEY] = {
+                    "t": _t,
+                    "h": int(video_tensor.shape[3]),
+                    "w": int(video_tensor.shape[4]),
+                    "hp": hp,
+                    "wp": wp,
+                    "has_cls": has_cls,
+                    "source": "fallback:token_norm",
+                }
+                if target_frame is None:
+                    return sal_map.astype(np.float32, copy=False)
+                return sal_map[int(target_frame)].astype(np.float32, copy=False)
 
             # Save meta
             if attn.dim() == 4:
