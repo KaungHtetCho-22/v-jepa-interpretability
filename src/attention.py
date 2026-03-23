@@ -2,7 +2,7 @@ import logging
 import math
 import os
 import sys
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 
@@ -25,6 +25,88 @@ except ModuleNotFoundError as exc:  # pragma: no cover
 logger = logging.getLogger("vjepa.attention")
 
 META_KEY = "__vjepa_meta__"
+CLS_ATTN_KEY = "__vjepa_cls_attn__"
+
+
+def _resolve_layer_idx(layer_idx: int, n: int) -> int:
+    idx = layer_idx if layer_idx >= 0 else (n + layer_idx)
+    if idx < 0 or idx >= n:
+        raise IndexError(f"layer_idx {layer_idx} out of range for {n} layers")
+    return idx
+
+
+def _find_qkv_modules(encoder: nn.Module) -> list[tuple[str, nn.Module, nn.Module | None]]:
+    modules = dict(encoder.named_modules())
+    found: list[tuple[str, nn.Module, nn.Module | None]] = []
+    for name, module in modules.items():
+        if name.endswith(".qkv"):
+            parent = modules.get(name.rsplit(".", 1)[0])
+            found.append((name, module, parent))
+    return found
+
+
+def _infer_num_heads(parent_attn: nn.Module | None, embed_dim: int) -> int:
+    if parent_attn is not None:
+        for attr in ("num_heads", "heads", "n_heads"):
+            if hasattr(parent_attn, attr):
+                try:
+                    return int(getattr(parent_attn, attr))
+                except Exception:
+                    pass
+
+    # Fallback heuristic: common head dims
+    for head_dim in (64, 80, 40, 32):
+        if embed_dim % head_dim == 0:
+            return embed_dim // head_dim
+    raise RuntimeError("Unable to infer num_heads for attention module.")
+
+
+def _attn_vec_from_qkv(
+    qkv: torch.Tensor,  # (B, N, 3*D)
+    parent_attn: nn.Module | None,
+    global_query: Literal["token0", "mean"],
+    head_idx: int | None,
+) -> torch.Tensor:
+    """Compute a (N,) attention vector from qkv for a single global query."""
+    if qkv.ndim != 3:
+        raise ValueError(f"Expected qkv output (B, N, 3*D); got {tuple(qkv.shape)}")
+    b, n, three_d = qkv.shape
+    if b != 1:
+        raise ValueError("Only batch size 1 is supported for attention visualization.")
+    if three_d % 3 != 0:
+        raise ValueError("qkv last dim must be divisible by 3")
+
+    d = three_d // 3
+    num_heads = _infer_num_heads(parent_attn, embed_dim=d)
+    head_dim = d // num_heads
+    if head_dim * num_heads != d:
+        raise RuntimeError("embed_dim is not divisible by num_heads")
+
+    q = qkv[:, :, :d].reshape(1, n, num_heads, head_dim).permute(0, 2, 1, 3)  # (1, heads, N, hd)
+    k = qkv[:, :, d : 2 * d].reshape(1, n, num_heads, head_dim).permute(0, 2, 1, 3)
+
+    if global_query == "token0":
+        qg = q[:, :, 0, :]  # (1, heads, hd)
+    else:
+        qg = q.mean(dim=2)  # (1, heads, hd)
+
+    scale = None
+    if parent_attn is not None and hasattr(parent_attn, "scale"):
+        try:
+            scale = float(getattr(parent_attn, "scale"))
+        except Exception:
+            scale = None
+    if scale is None:
+        scale = 1.0 / math.sqrt(float(head_dim))
+
+    logits = (k * qg.unsqueeze(2)).sum(dim=-1) * scale  # (1, heads, N)
+    attn = torch.softmax(logits, dim=-1).squeeze(0)  # (heads, N)
+
+    if head_idx is None:
+        return attn.mean(dim=0)
+    if head_idx < 0 or head_idx >= int(attn.shape[0]):
+        raise IndexError(f"head_idx {head_idx} out of range for {attn.shape[0]} heads")
+    return attn[head_idx]
 
 
 def _storage_keys_in_order(hook_storage: dict[str, Any]) -> list[str]:
@@ -193,44 +275,84 @@ def extract_attention_maps(
     """
     # Clear storage for a clean capture (caller is still responsible for lifecycle)
     for k, v in list(hook_storage.items()):
-        if k == META_KEY:
+        if k in (META_KEY, CLS_ATTN_KEY):
             continue
         if isinstance(v, list):
             v.clear()
 
     encoder.eval()
-    with torch.no_grad():
+
+    # Preferred path: compute attention map from qkv projections (doesn't require model to return attention weights).
+    qkvs = _find_qkv_modules(encoder)
+    if qkvs:
+        idx = _resolve_layer_idx(layer_idx, len(qkvs))
+        qkv_name, qkv_mod, qkv_parent = qkvs[idx]
+
+        captured: dict[str, torch.Tensor] = {}
+
+        def _hook(_m: nn.Module, _inp: tuple[Any, ...], out: Any) -> None:
+            if isinstance(out, torch.Tensor):
+                captured["qkv"] = out.detach()
+
+        handle = qkv_mod.register_forward_hook(_hook)
         try:
-            _ = encoder(video_tensor)
-        except TypeError:
-            # HF models may accept output_attentions; try to enable without breaking others
-            _ = encoder(video_tensor, output_attentions=True)  # type: ignore[call-arg]
+            with torch.no_grad():
+                _ = encoder(video_tensor)
+        finally:
+            handle.remove()
+
+        if "qkv" not in captured:
+            raise RuntimeError("Failed to capture qkv output; attention visualization is unavailable for this model.")
+
+        qkv = captured["qkv"]
+        seq_len = int(qkv.shape[1])
+        t = int(video_tensor.shape[2])
+
+        # Infer whether a global CLS exists by checking which option yields a valid patch grid.
+        has_cls = False
+        try:
+            _t, hp, wp = _infer_patch_grid(video_tensor, seq_len, has_cls=True)
+            has_cls = True
+        except Exception:
+            _t, hp, wp = _infer_patch_grid(video_tensor, seq_len, has_cls=False)
+            has_cls = False
+
+        # Use token0 as global query when CLS exists; otherwise use mean query token.
+        global_query: Literal["token0", "mean"] = "token0" if has_cls else "mean"
+        attn_vec = _attn_vec_from_qkv(qkv, qkv_parent, global_query=global_query, head_idx=head_idx)  # (N,)
+
+        hook_storage[META_KEY] = {
+            "t": _t,
+            "h": int(video_tensor.shape[3]),
+            "w": int(video_tensor.shape[4]),
+            "hp": hp,
+            "wp": wp,
+            "has_cls": has_cls,
+            "source": f"qkv:{qkv_name}",
+        }
+        hook_storage[CLS_ATTN_KEY] = [attn_vec.detach().cpu()]
+
+        start = 1 if has_cls else 0
+        token_importance = attn_vec[start:]
+        token_importance = token_importance.reshape(_t, hp, wp)
+        up = F.interpolate(
+            token_importance.unsqueeze(1),  # treat T as batch
+            size=(int(video_tensor.shape[3]), int(video_tensor.shape[4])),
+            mode="bilinear",
+            align_corners=False,
+        ).squeeze(1)
+        up = up - up.min()
+        up = up / up.max().clamp_min(1e-8)
+        up_np = up.detach().float().cpu().numpy()
+        if target_frame is None:
+            return up_np.astype(np.float32, copy=False)
+        return up_np[int(target_frame)].astype(np.float32, copy=False)
+
+    # Fallback path: rely on whatever hooks captured.
+    with torch.no_grad():
+        _ = encoder(video_tensor)
 
     attn = _get_layer_attention(hook_storage, layer_idx)
-    # Save meta for downstream rollout/grid helpers
-    if attn.dim() == 4:
-        attn_for_meta = attn.squeeze(0)
-    else:
-        attn_for_meta = attn
-    seq_len = int(attn_for_meta.shape[-1])
-    t = int(video_tensor.shape[2])
-    if seq_len % t == 0:
-        tokens_per_frame_guess = seq_len // t
-    elif (seq_len - 1) % t == 0:
-        tokens_per_frame_guess = (seq_len - 1) // t
-    else:
-        tokens_per_frame_guess = None
-    has_cls = _has_cls_token(encoder, seq_len, tokens_per_frame_guess)
-    _t, hp, wp = _infer_patch_grid(video_tensor, seq_len, has_cls)
-    hook_storage[META_KEY] = {
-        "t": _t,
-        "h": int(video_tensor.shape[3]),
-        "w": int(video_tensor.shape[4]),
-        "hp": hp,
-        "wp": wp,
-        "has_cls": has_cls,
-    }
-
     attn_map = _attention_to_map(attn, encoder, video_tensor, head_idx=head_idx, target_frame=target_frame)
     return attn_map.astype(np.float32, copy=False)
 
