@@ -243,7 +243,8 @@ def register_attention_hooks(
     # Store handles on the module so callers can remove later if desired.
     setattr(encoder, "_vjepa_attn_hook_handles", handles)
     logger.info("Registered %d attention hooks.", len(handles))
-    return dict(storage)
+    # Return the live storage object (do not copy), so hooks keep filling it.
+    return storage
 
 
 def preprocess_video(
