@@ -280,7 +280,7 @@ Probing **V-JEPA 2** internal representations through attention maps, embedding 
         with gr.Tabs():
             with gr.Tab("Attention Explorer"):
                 with gr.Row():
-                    video = gr.Video(label="Upload video clip", sources=["upload"], type="filepath")
+                    video = gr.Video(label="Upload video clip", sources=["upload"])
                 with gr.Row():
                     layer = gr.Slider(0, 31, value=31, step=1, label="Encoder layer")
                     frame = gr.Slider(0, 15, value=0, step=1, label="Frame index")
@@ -295,7 +295,7 @@ Probing **V-JEPA 2** internal representations through attention maps, embedding 
                 btn.click(run_attention_tab, inputs=[video, layer, frame, head, rollout], outputs=[out_frame, out_overlay, out_grid])
 
             with gr.Tab("Temporal Drift"):
-                video = gr.Video(label="Upload video clip", sources=["upload"], type="filepath")
+                video = gr.Video(label="Upload video clip", sources=["upload"])
                 with gr.Row():
                     pooling = gr.Radio(["Mean pooling", "Max pooling"], value="Mean pooling", label="Frame pooling")
                     layer = gr.Slider(0, 31, value=31, step=1, label="Encoder layer")
@@ -307,7 +307,7 @@ Probing **V-JEPA 2** internal representations through attention maps, embedding 
                 btn.click(run_temporal_tab, inputs=[video, pooling, layer], outputs=[out_sim, out_drift, out_pca])
 
             with gr.Tab("Nearest Neighbors"):
-                video = gr.Video(label="Upload query video", sources=["upload"], type="filepath")
+                video = gr.Video(label="Upload query video", sources=["upload"])
                 with gr.Row():
                     k = gr.Slider(1, 10, value=5, step=1, label="Number of results")
                     btn = gr.Button("Find similar clips", variant="primary")
@@ -323,7 +323,7 @@ Probing **V-JEPA 2** internal representations through attention maps, embedding 
                     )
 
             with gr.Tab("Masking Strategies"):
-                video = gr.Video(label="Upload video clip", sources=["upload"], type="filepath")
+                video = gr.Video(label="Upload video clip", sources=["upload"])
                 with gr.Row():
                     ratio = gr.Slider(0.5, 0.95, value=0.9, step=0.05, label="Mask ratio")
                     strat = gr.Radio(["Tube masking", "Random masking", "Block masking"], value="Tube masking", label="Strategy")
