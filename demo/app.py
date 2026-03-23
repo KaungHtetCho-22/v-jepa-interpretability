@@ -73,6 +73,16 @@ def _safe_warning(msg: str) -> None:
     except Exception:
         logger.warning(msg)
 
+def _clamp_layer(layer_idx: int, cfg: dict[str, Any]) -> int:
+    n = cfg.get("num_layers")
+    if isinstance(n, int) and n > 0:
+        if layer_idx < 0:
+            return layer_idx
+        if layer_idx >= n:
+            _safe_warning(f"layer_idx {layer_idx} out of range for {n} layers; using {n-1}.")
+            return n - 1
+    return layer_idx
+
 
 def run_attention_tab(
     video_input: Any,
@@ -88,6 +98,7 @@ def run_attention_tab(
             return None, None, None
 
         enc, cfg, storage = get_encoder()
+        layer_idx = _clamp_layer(int(layer_idx), cfg)
         frames = load_video_frames(path, max_frames=16, resize=224)
         if len(frames) == 0:
             _safe_warning("Could not decode video.")
@@ -149,6 +160,7 @@ def run_temporal_tab(
             return None, None, None
 
         enc, cfg, _ = get_encoder()
+        layer_idx = _clamp_layer(int(layer_idx), cfg)
         frames = load_video_frames(path, max_frames=16, resize=224)
         if len(frames) == 0:
             _safe_warning("Could not decode video.")

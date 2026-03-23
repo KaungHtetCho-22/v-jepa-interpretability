@@ -36,6 +36,19 @@ def _resolve_layer_idx(layer_idx: int, n: int) -> int:
     return idx
 
 
+def _safe_layer_idx(layer_idx: int, n: int) -> tuple[int, bool]:
+    """Resolve layer index and clamp into range if needed."""
+    idx = layer_idx if layer_idx >= 0 else (n + layer_idx)
+    clamped = False
+    if idx < 0:
+        idx = 0
+        clamped = True
+    if idx >= n:
+        idx = n - 1
+        clamped = True
+    return idx, clamped
+
+
 def _find_qkv_modules(encoder: nn.Module) -> list[tuple[str, nn.Module, nn.Module | None]]:
     modules = dict(encoder.named_modules())
     found: list[tuple[str, nn.Module, nn.Module | None]] = []
@@ -393,7 +406,9 @@ def extract_attention_maps(
     # Preferred path: compute attention map from qkv projections (doesn't require model to return attention weights).
     qkvs = _find_qkv_modules(encoder)
     if qkvs:
-        idx = _resolve_layer_idx(layer_idx, len(qkvs))
+        idx, clamped = _safe_layer_idx(layer_idx, len(qkvs))
+        if clamped:
+            logger.warning("layer_idx=%s out of range; clamped to %d (num_layers=%d).", layer_idx, idx, len(qkvs))
         qkv_name, qkv_mod, qkv_parent = qkvs[idx]
 
         captured: dict[str, torch.Tensor] = {}
@@ -477,7 +492,10 @@ def extract_attention_maps(
                 if a_t is not None:
                     hook_storage[f"attentions.{i}"] = [a_t.detach()]
 
-            attn_raw = attentions[_resolve_layer_idx(layer_idx, len(attentions))]
+            idx, clamped = _safe_layer_idx(layer_idx, len(attentions))
+            if clamped:
+                logger.warning("layer_idx=%s out of range; clamped to %d (num_layers=%d).", layer_idx, idx, len(attentions))
+            attn_raw = attentions[idx]
             attn = _coerce_attention_tensor(attn_raw)
             if attn is None:
                 # Some models return `None` attentions even when requested (e.g., flash attention).

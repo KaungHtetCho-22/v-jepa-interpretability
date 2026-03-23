@@ -121,8 +121,14 @@ def extract_frame_embeddings(
                 ) from exc
             if not hasattr(out, "hidden_states") or out.hidden_states is None:
                 raise RuntimeError("Model did not return hidden_states; cannot select a non-final layer output.")
-            hidden_states = out.hidden_states
-            selected = hidden_states[layer_idx]
+            hidden_states = list(out.hidden_states)
+            n_layers = len(hidden_states)
+            idx = layer_idx if layer_idx >= 0 else (n_layers + layer_idx)
+            if idx < 0:
+                idx = 0
+            if idx >= n_layers:
+                idx = n_layers - 1
+            selected = hidden_states[idx]
             if not isinstance(selected, torch.Tensor):
                 raise RuntimeError("Selected hidden state is not a Tensor.")
             tokens = selected
