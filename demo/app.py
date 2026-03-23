@@ -30,7 +30,7 @@ from src.masking import (
     visualize_masking_on_frames,
 )
 from src.model import load_encoder, preprocess_video, register_attention_hooks
-from src.retrieval import find_nearest_neighbors, load_index
+from src.retrieval import find_nearest_neighbors, load_index, save_index
 
 logger = logging.getLogger("vjepa.demo")
 
@@ -41,6 +41,7 @@ HOOK_STORAGE: dict[str, Any] | None = None
 
 REFERENCE_INDEX: dict[str, Any] | None = None
 REFERENCE_INDEX_PATH = os.environ.get("VJEPA_REFERENCE_INDEX", "data/reference_index.npz")
+REFERENCE_VIDEO_DIR = os.environ.get("VJEPA_REFERENCE_VIDEO_DIR", "data/mini_4x10")
 
 
 def get_encoder() -> tuple[Any, dict[str, Any], dict[str, Any]]:
@@ -73,6 +74,70 @@ def _safe_warning(msg: str) -> None:
     except Exception:
         logger.warning(msg)
 
+
+def _list_videos_with_labels(video_dir: str) -> tuple[list[str], list[str | None]]:
+    exts = {".mp4", ".mov", ".mkv", ".webm", ".avi"}
+    paths: list[str] = []
+    labels: list[str | None] = []
+    if not os.path.isdir(video_dir):
+        return paths, labels
+    for root, _dirs, files in os.walk(video_dir):
+        for fn in sorted(files):
+            ext = os.path.splitext(fn)[1].lower()
+            if ext not in exts:
+                continue
+            p = os.path.join(root, fn)
+            paths.append(p)
+            rel = os.path.relpath(os.path.dirname(p), video_dir)
+            label = None if rel in (".", "") else rel.split(os.sep)[0]
+            labels.append(label)
+    return paths, labels
+
+
+def build_reference_index(video_dir: str, save_path: str = REFERENCE_INDEX_PATH) -> str:
+    """Build and persist a tiny reference index from a folder of clips."""
+    global REFERENCE_INDEX
+    try:
+        video_dir = str(video_dir or "").strip()
+        if not video_dir:
+            return "Missing `video_dir`."
+        paths, labels = _list_videos_with_labels(video_dir)
+        if not paths:
+            return f"No videos found under `{video_dir}`."
+
+        enc, cfg, _ = get_encoder()
+        embs: list[np.ndarray] = []
+        paths_out: list[str] = []
+        labels_out: list[str | None] = []
+
+        for p, lab in zip(paths, labels, strict=False):
+            frames = load_video_frames(p, max_frames=16, resize=224)
+            if not frames:
+                continue
+            video = preprocess_video(frames, image_size=224, num_frames=16, device=str(cfg["device"]))
+            frame_emb = extract_frame_embeddings(enc, video, pooling="mean")
+            clip_emb = frame_emb.mean(axis=0).astype(np.float32)
+            embs.append(clip_emb)
+            paths_out.append(p)
+            labels_out.append(lab)
+
+        if not embs:
+            return f"No readable videos found under `{video_dir}`."
+
+        index = {
+            "embeddings": np.stack(embs, axis=0).astype(np.float32),
+            "paths": paths_out,
+            "labels": labels_out,
+            "metadata": {"model_size": cfg.get("model_size", "unknown"), "pooling": "mean", "video_dir": video_dir},
+        }
+        save_index(index, save_path)
+        REFERENCE_INDEX = index
+        return f"Built index with {len(paths_out)} clips → `{save_path}`"
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Failed to build reference index")
+        return f"Error: {type(exc).__name__}: {exc}"
+
+
 def _layer_slider_update(layer_idx: int, cfg: dict[str, Any]) -> tuple[int, Any]:
     """Clamp layer_idx to model depth and return a gr.update() for the slider."""
     n = cfg.get("num_layers")
@@ -93,7 +158,7 @@ def run_attention_tab(
     frame_idx: int,
     head_selection: str,
     use_rollout: bool,
-) -> tuple[np.ndarray | None, np.ndarray | None, np.ndarray | None]:
+) -> tuple[np.ndarray | None, np.ndarray | None, np.ndarray | None, Any]:
     try:
         path = coerce_video_path(video_input)
         if not path:
@@ -155,7 +220,7 @@ def run_temporal_tab(
     video_input: Any,
     pooling: str,
     layer_idx: int,
-) -> tuple[Any, Any, Any]:
+) -> tuple[Any, Any, Any, Any]:
     try:
         path = coerce_video_path(video_input)
         if not path:
@@ -209,7 +274,7 @@ def run_retrieval_tab(video_input: Any, k: int) -> tuple[np.ndarray | None, list
         from src.retrieval import render_retrieval_results
 
         grid = render_retrieval_results(frames, results, num_preview_frames=4)
-        table = [[r["rank"], os.path.basename(r["path"]), r.get("label"), float(r["similarity"])] for r in results]
+        table = [[r["rank"], os.path.basename(r["path"]), r.get("label") or "", float(r["similarity"])] for r in results]
         return grid, table
     except Exception as exc:  # noqa: BLE001
         logger.exception("Retrieval tab failed")
@@ -285,7 +350,7 @@ Probing **V-JEPA 2** internal representations through attention maps, embedding 
                 with gr.Row():
                     video = gr.Video(label="Upload video clip", sources=["upload"])
                 with gr.Row():
-                    layer = gr.Slider(0, 31, value=31, step=1, label="Encoder layer")
+                    layer = gr.Slider(0, 23, value=23, step=1, label="Encoder layer")
                     frame = gr.Slider(0, 15, value=0, step=1, label="Frame index")
                 with gr.Row():
                     head = gr.Dropdown(_head_options(), value="Average heads", label="Attention head")
@@ -305,7 +370,7 @@ Probing **V-JEPA 2** internal representations through attention maps, embedding 
                 video = gr.Video(label="Upload video clip", sources=["upload"])
                 with gr.Row():
                     pooling = gr.Radio(["Mean pooling", "Max pooling"], value="Mean pooling", label="Frame pooling")
-                    layer = gr.Slider(0, 31, value=31, step=1, label="Encoder layer")
+                    layer = gr.Slider(0, 23, value=23, step=1, label="Encoder layer")
                     btn = gr.Button("Analyze", variant="primary")
                 with gr.Row():
                     out_sim = gr.Plot(label="Frame similarity heatmap")
@@ -328,10 +393,12 @@ Probing **V-JEPA 2** internal representations through attention maps, embedding 
 
                 idx = get_reference_index()
                 if idx is None:
-                    gr.Markdown(
-                        f"Reference index not found at `{REFERENCE_INDEX_PATH}`. "
-                        "Build one with `python scripts/build_index.py`."
-                    )
+                    gr.Markdown("No reference index found. Build one locally to enable retrieval:")
+                    with gr.Row():
+                        ref_dir = gr.Textbox(value=REFERENCE_VIDEO_DIR, label="Reference video folder", scale=4)
+                        build_btn = gr.Button("Build index", variant="secondary", scale=1)
+                    build_out = gr.Markdown()
+                    build_btn.click(build_reference_index, inputs=[ref_dir], outputs=[build_out])
 
             with gr.Tab("Masking Strategies"):
                 video = gr.Video(label="Upload video clip", sources=["upload"])

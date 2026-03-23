@@ -89,6 +89,14 @@ def coerce_video_path(video_input: Any) -> str:
         return ""
     if isinstance(video_input, str):
         return video_input
+    # Gradio >=5 may pass a FileData-like object
+    for attr in ("path", "name"):
+        try:
+            v = getattr(video_input, attr)
+        except Exception:
+            v = None
+        if isinstance(v, str) and v:
+            return v
     if isinstance(video_input, dict):
         for key in ("path", "name", "video", "file"):
             if key in video_input and video_input[key]:
@@ -97,4 +105,9 @@ def coerce_video_path(video_input: Any) -> str:
         # Sometimes (path, metadata)
         if isinstance(video_input[0], str):
             return video_input[0]
-    return str(video_input)
+    # Last resort: try to stringify, but avoid returning "FileData(...)" for empty objects.
+    try:
+        s = str(video_input)
+    except Exception:
+        s = ""
+    return s if os.path.exists(s) else ""

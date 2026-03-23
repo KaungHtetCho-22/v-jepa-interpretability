@@ -1,51 +1,70 @@
-# Setup (Reproducible)
+# Setup
 
-This repo is set up to be reproducible with `uv`.
+This repo is reproducible with `uv`.
 
 ## Requirements
 
 - Python 3.10+
-- `uv` installed
+- `uv`
+- (Recommended) CUDA-capable GPU for interactive attention/embedding extraction
 
 ## Install `uv`
-
-If you don't already have it:
 
 ```bash
 curl -LsSf https://astral.sh/uv/install.sh | sh
 ```
 
-Restart your shell (or open a new terminal) so `uv` is on your `PATH`.
+Restart your shell so `uv` is on your `PATH`.
 
-## Create environment + install deps
+## Install dependencies
 
 From the repo root:
 
 ```bash
 uv sync
-```
-
-This installs the base dependencies. PyTorch is intentionally left as an optional extra (CUDA setup varies by machine); it gets installed in the next session via:
-
-```bash
 uv sync --extra torch
 ```
 
-If `decord` fails to install on your machine/OS, you can still proceed; the project will use `torchvision.io.read_video` as a fallback later in development.
+If `decord` fails to install on your machine/OS, the project falls back to `torchvision.io.read_video`.
 
-## Add a sample video
+## (Optional) Build a tiny demo dataset
 
-Place a sample video at `data/sample.mp4`. For convenience, you can download a small public-domain sample:
+This creates a small **4 classes × 10 clips** dataset from public-domain / CC videos (requires `curl` + `ffmpeg`):
 
 ```bash
-mkdir -p data
-curl -L -o data/sample.mp4 https://download.blender.org/peach/bigbuckbunny_movies/BigBuckBunny_320x180.mp4
+uv run python scripts/make_mini_dataset.py --out_dir data/mini_4x10
 ```
 
-## Launch the demo
+## Run the demo
 
 ```bash
 bash scripts/run_demo.sh
 ```
 
-At this stage (Session 00), the demo is a stub and will exit with a clear message indicating it is not implemented yet.
+The Nearest Neighbors tab needs a reference index. Build one (for example from the toy dataset):
+
+```bash
+uv run python scripts/build_index.py --video_dir data/mini_4x10 --save_path data/reference_index.npz
+```
+
+## Run experiments (CLI)
+
+```bash
+uv run python src/model.py
+uv run python src/attention.py
+uv run python src/embeddings.py
+uv run python src/masking.py
+```
+
+Linear probe:
+
+```bash
+uv run python scripts/extract_features.py --video_dir data/mini_4x10 --output data/features_mini.npz --classes bunny sintel tears dream --num_clips_per_class 10
+uv run python src/probe.py --features data/features_mini.npz --pixel_baseline_dir data/mini_4x10 --out_dir outputs/probe_mini
+```
+
+## Troubleshooting
+
+- **`ModuleNotFoundError: No module named 'torch'`**: run `uv sync --extra torch`.
+- **Matplotlib cache warnings**: set `MPLCONFIGDIR=/tmp/mpl` if your home dir is read-only.
+- **Retrieval says “Reference index not found”**: run `scripts/build_index.py` or use the “Build index” button in the demo.

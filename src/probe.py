@@ -347,29 +347,91 @@ def _resize_rgb(img: np.ndarray, w: int, h: int) -> np.ndarray:
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(levelname)s:%(name)s:%(message)s")
 
-    # Testing without real dataset: random features should yield ~random accuracy.
-    os.makedirs("data", exist_ok=True)
-    test_path = "data/test_features.npz"
-    if not os.path.exists(test_path):
-        np.random.seed(42)
-        n_per_class, n_classes, d = 20, 10, 768
-        features = np.random.randn(n_per_class * n_classes, d).astype(np.float32)
-        labels = np.repeat(np.arange(n_classes), n_per_class).astype(np.int64)
-        np.savez(
-            test_path,
-            features=features,
-            labels=labels,
-            class_names=[f"class_{i}" for i in range(n_classes)],
-        )
-        logger.info("Wrote %s", test_path)
+    import argparse
 
-    results = train_linear_probe(test_path)
-    print(evaluate_probe(results))
+    ap = argparse.ArgumentParser(description="Train and report a linear probe from frozen V-JEPA features.")
+    ap.add_argument(
+        "--features",
+        type=str,
+        default=("data/features_mini_vjepa_vitb.npz" if os.path.exists("data/features_mini_vjepa_vitb.npz") else ""),
+        help="Path to a .npz produced by scripts/extract_features.py",
+    )
+    ap.add_argument("--test_size", type=float, default=0.2)
+    ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--max_iter", type=int, default=2000)
+    ap.add_argument("--C", type=float, default=1.0)
+    ap.add_argument("--out_dir", type=str, default="outputs/probe")
+    ap.add_argument(
+        "--pixel_baseline_dir",
+        type=str,
+        default="",
+        help="Optional: directory laid out as class folders to train a pixel baseline.",
+    )
+    ap.add_argument("--pixel_resize", type=int, default=32)
+    ap.add_argument("--pixel_frames", type=int, default=8)
+    ap.add_argument("--clips_per_class", type=int, default=20)
+    args = ap.parse_args()
+
+    os.makedirs(args.out_dir, exist_ok=True)
+
+    features_path = str(args.features or "").strip()
+    if not features_path:
+        # Testing without real dataset: random features should yield ~random accuracy.
+        os.makedirs("data", exist_ok=True)
+        features_path = "data/test_features.npz"
+        if not os.path.exists(features_path):
+            np.random.seed(42)
+            n_per_class, n_classes, d = 20, 10, 768
+            features = np.random.randn(n_per_class * n_classes, d).astype(np.float32)
+            labels = np.repeat(np.arange(n_classes), n_per_class).astype(np.int64)
+            np.savez(
+                features_path,
+                features=features,
+                labels=labels,
+                class_names=[f"class_{i}" for i in range(n_classes)],
+            )
+            logger.info("Wrote %s", features_path)
+
+    results = train_linear_probe(
+        features_path,
+        test_size=float(args.test_size),
+        random_state=int(args.seed),
+        max_iter=int(args.max_iter),
+        C=float(args.C),
+    )
+    report = evaluate_probe(results)
+    print(report)
+    with open(os.path.join(args.out_dir, "linear_probe.txt"), "w", encoding="utf-8") as f:
+        f.write(report + "\n")
 
     try:
         fig = plot_confusion_matrix(results)
-        os.makedirs("assets", exist_ok=True)
-        fig.savefig("assets/probe_confusion_matrix.png", dpi=120, bbox_inches="tight")
-        logger.info("Saved assets/probe_confusion_matrix.png")
+        fig.savefig(os.path.join(args.out_dir, "confusion_matrix.png"), dpi=140, bbox_inches="tight")
+        logger.info("Saved %s", os.path.join(args.out_dir, "confusion_matrix.png"))
     except Exception as exc:  # noqa: BLE001
         logger.warning("Failed to save confusion matrix figure: %s", exc)
+
+    pixel_dir = str(args.pixel_baseline_dir or "").strip()
+    if pixel_dir:
+        try:
+            data = np.load(features_path, allow_pickle=True)
+            class_names = data.get("class_names")
+            class_list = class_names.tolist() if class_names is not None else results.get("class_names", [])
+            pix = train_pixel_baseline(
+                pixel_dir,
+                class_names=[str(x) for x in class_list],
+                num_clips_per_class=int(args.clips_per_class),
+                frames_per_clip=int(args.pixel_frames),
+                resize_to=int(args.pixel_resize),
+                random_state=int(args.seed),
+                test_size=float(args.test_size),
+                max_iter=int(args.max_iter),
+                C=float(args.C),
+            )
+            pix_report = evaluate_probe(pix)
+            print("\nPixel baseline\n──────────────")
+            print(pix_report)
+            with open(os.path.join(args.out_dir, "pixel_baseline.txt"), "w", encoding="utf-8") as f:
+                f.write(pix_report + "\n")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Pixel baseline failed (%s: %s)", type(exc).__name__, exc)

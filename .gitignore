@@ -1,7 +1,7 @@
 # Data / videos
 data/
 assets/*.mp4
-assets/*.png
+outputs/
 
 # Model weights / checkpoints
 *.pt

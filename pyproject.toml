@@ -2,7 +2,7 @@
 name = "vjepa-interpretability"
 version = "0.1.0"
 description = "Interpretability experiments for V-JEPA 2 (video world model)."
-readme = "SETUP.md"
+readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
   "transformers>=4.40.0",
@@ -32,4 +32,4 @@ requires = ["hatchling>=1.21.0"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-only-include = ["src", "demo", "scripts", "SETUP.md"]
+only-include = ["src", "demo", "scripts", "README.md", "FINDINGS.md", "SETUP.md", "assets"]
