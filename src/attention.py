@@ -110,6 +110,28 @@ def _attn_vec_from_qkv(
     return attn[head_idx]
 
 
+def _coerce_attention_tensor(attn_layer: Any) -> torch.Tensor | None:
+    """Best-effort extraction of an attention tensor from a layer attention object."""
+    if isinstance(attn_layer, torch.Tensor):
+        return attn_layer
+    if isinstance(attn_layer, (tuple, list)):
+        for item in attn_layer:
+            if isinstance(item, torch.Tensor):
+                return item
+            if isinstance(item, (tuple, list, dict)):
+                coerced = _coerce_attention_tensor(item)
+                if coerced is not None:
+                    return coerced
+        return None
+    if isinstance(attn_layer, dict):
+        for key in ("attn", "attn_weights", "attention", "attentions"):
+            val = attn_layer.get(key)
+            if isinstance(val, torch.Tensor):
+                return val
+        return None
+    return None
+
+
 def _storage_keys_in_order(hook_storage: dict[str, Any]) -> list[str]:
     # Preserve insertion order (matches forward execution order better than sorting).
     return [k for k in hook_storage.keys() if k != META_KEY]
@@ -364,12 +386,14 @@ def extract_attention_maps(
         if isinstance(attentions, (tuple, list)) and len(attentions) > 0:
             # Populate storage so rollout/head viz can reuse
             for i, a in enumerate(attentions):
-                if isinstance(a, torch.Tensor):
-                    hook_storage[f"attentions.{i}"] = [a.detach()]
+                a_t = _coerce_attention_tensor(a)
+                if a_t is not None:
+                    hook_storage[f"attentions.{i}"] = [a_t.detach()]
 
-            attn = attentions[_resolve_layer_idx(layer_idx, len(attentions))]
-            if not isinstance(attn, torch.Tensor):
-                raise RuntimeError("Model returned attentions but selected layer is not a Tensor.")
+            attn_raw = attentions[_resolve_layer_idx(layer_idx, len(attentions))]
+            attn = _coerce_attention_tensor(attn_raw)
+            if attn is None:
+                raise RuntimeError("Model returned attentions but could not coerce selected layer to a Tensor.")
 
             # Save meta
             if attn.dim() == 4:
