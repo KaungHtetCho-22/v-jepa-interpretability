@@ -73,15 +73,18 @@ def _safe_warning(msg: str) -> None:
     except Exception:
         logger.warning(msg)
 
-def _clamp_layer(layer_idx: int, cfg: dict[str, Any]) -> int:
+def _layer_slider_update(layer_idx: int, cfg: dict[str, Any]) -> tuple[int, Any]:
+    """Clamp layer_idx to model depth and return a gr.update() for the slider."""
     n = cfg.get("num_layers")
     if isinstance(n, int) and n > 0:
-        if layer_idx < 0:
-            return layer_idx
-        if layer_idx >= n:
-            _safe_warning(f"layer_idx {layer_idx} out of range for {n} layers; using {n-1}.")
-            return n - 1
-    return layer_idx
+        idx = layer_idx if layer_idx >= 0 else layer_idx
+        if idx >= n:
+            idx = n - 1
+        if idx < 0 and (-idx) > n:
+            idx = -1
+        # Always keep the slider's max in sync once we know the true depth.
+        return idx, gr.update(maximum=n - 1, value=idx if idx >= 0 else (n - 1))
+    return layer_idx, gr.update()
 
 
 def run_attention_tab(
@@ -90,7 +93,7 @@ def run_attention_tab(
     frame_idx: int,
     head_selection: str,
     use_rollout: bool,
-    ) -> tuple[np.ndarray | None, np.ndarray | None, np.ndarray | None]:
+) -> tuple[np.ndarray | None, np.ndarray | None, np.ndarray | None]:
     try:
         path = coerce_video_path(video_input)
         if not path:
@@ -98,7 +101,7 @@ def run_attention_tab(
             return None, None, None
 
         enc, cfg, storage = get_encoder()
-        layer_idx = _clamp_layer(int(layer_idx), cfg)
+        layer_idx, layer_update = _layer_slider_update(int(layer_idx), cfg)
         frames = load_video_frames(path, max_frames=16, resize=224)
         if len(frames) == 0:
             _safe_warning("Could not decode video.")
@@ -141,11 +144,11 @@ def run_attention_tab(
         else:
             grid = None
 
-        return frame, overlay, grid
+        return frame, overlay, grid, layer_update
     except Exception as exc:  # noqa: BLE001
         logger.exception("Attention tab failed")
         _safe_warning(f"Error: {type(exc).__name__}: {exc}")
-        return None, None, None
+        return None, None, None, gr.update()
 
 
 def run_temporal_tab(
@@ -160,7 +163,7 @@ def run_temporal_tab(
             return None, None, None
 
         enc, cfg, _ = get_encoder()
-        layer_idx = _clamp_layer(int(layer_idx), cfg)
+        layer_idx, layer_update = _layer_slider_update(int(layer_idx), cfg)
         frames = load_video_frames(path, max_frames=16, resize=224)
         if len(frames) == 0:
             _safe_warning("Could not decode video.")
@@ -174,11 +177,11 @@ def run_temporal_tab(
         drift = compute_consecutive_drift(emb)
         traj = compute_pca_trajectory(emb, n_components=2)
 
-        return plot_similarity_heatmap(sim), plot_drift_curve(drift), plot_pca_trajectory(traj)
+        return plot_similarity_heatmap(sim), plot_drift_curve(drift), plot_pca_trajectory(traj), layer_update
     except Exception as exc:  # noqa: BLE001
         logger.exception("Temporal tab failed")
         _safe_warning(f"Error: {type(exc).__name__}: {exc}")
-        return None, None, None
+        return None, None, None, gr.update()
 
 
 def run_retrieval_tab(video_input: Any, k: int) -> tuple[np.ndarray | None, list[list[Any]] | None]:
@@ -292,7 +295,11 @@ Probing **V-JEPA 2** internal representations through attention maps, embedding 
                     out_frame = gr.Image(label="Original frame")
                     out_overlay = gr.Image(label="Attention overlay")
                 out_grid = gr.Image(label="Head grid (first 8 heads)")
-                btn.click(run_attention_tab, inputs=[video, layer, frame, head, rollout], outputs=[out_frame, out_overlay, out_grid])
+                btn.click(
+                    run_attention_tab,
+                    inputs=[video, layer, frame, head, rollout],
+                    outputs=[out_frame, out_overlay, out_grid, layer],
+                )
 
             with gr.Tab("Temporal Drift"):
                 video = gr.Video(label="Upload video clip", sources=["upload"])
@@ -304,7 +311,11 @@ Probing **V-JEPA 2** internal representations through attention maps, embedding 
                     out_sim = gr.Plot(label="Frame similarity heatmap")
                     out_drift = gr.Plot(label="Consecutive drift")
                 out_pca = gr.Plot(label="PCA trajectory")
-                btn.click(run_temporal_tab, inputs=[video, pooling, layer], outputs=[out_sim, out_drift, out_pca])
+                btn.click(
+                    run_temporal_tab,
+                    inputs=[video, pooling, layer],
+                    outputs=[out_sim, out_drift, out_pca, layer],
+                )
 
             with gr.Tab("Nearest Neighbors"):
                 video = gr.Video(label="Upload query video", sources=["upload"])
