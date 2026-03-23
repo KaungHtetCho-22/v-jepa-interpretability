@@ -158,7 +158,7 @@ def _tokens_to_saliency_map(video_tensor: torch.Tensor, tokens: torch.Tensor) ->
         raise ValueError("Only batch size 1 supported.")
 
     seq_len = int(tokens.shape[1])
-    t = int(video_tensor.shape[2])
+    t_in = int(video_tensor.shape[2])
 
     # Infer CLS by whichever option yields a valid patch grid.
     has_cls = False
@@ -177,6 +177,7 @@ def _tokens_to_saliency_map(video_tensor: torch.Tensor, tokens: torch.Tensor) ->
     h = int(video_tensor.shape[3])
     w = int(video_tensor.shape[4])
     up = F.interpolate(sal.unsqueeze(1), size=(h, w), mode="bilinear", align_corners=False).squeeze(1)
+    up = _time_resample(up, t_in)
     up = up - up.min()
     up = up / up.max().clamp_min(1e-8)
     return up.detach().float().cpu().numpy()
@@ -245,15 +246,46 @@ def _infer_patch_grid(
             return t, hp, wp
 
     # Fallback: infer from tokens_total and T
-    if tokens_total % t != 0:
-        raise ValueError(f"Cannot infer per-frame tokens: tokens_total={tokens_total} not divisible by T={t}")
+    # Some video ViTs use a temporal tubelet size > 1, so the token sequence may
+    # correspond to an effective T' < T. Search divisors of T for a square grid.
+    candidates: list[int] = []
+    for d in range(1, t + 1):
+        if t % d == 0:
+            candidates.append(d)
+    candidates = sorted(candidates, reverse=True)  # prefer higher temporal resolution
 
-    per_frame = tokens_total // t
-    side = int(math.isqrt(per_frame))
-    if side * side != per_frame:
-        raise ValueError(f"Cannot infer patch grid: per_frame_tokens={per_frame} is not a square")
+    for t_eff in candidates:
+        if tokens_total % t_eff != 0:
+            continue
+        per_frame = tokens_total // t_eff
+        side = int(math.isqrt(per_frame))
+        if side * side == per_frame:
+            return t_eff, side, side
 
-    return t, side, side
+        # Allow rectangular grids for some models (e.g., 7x14 = 98).
+        for hp_try in range(1, per_frame + 1):
+            if per_frame % hp_try != 0:
+                continue
+            wp_try = per_frame // hp_try
+            # Prefer near-square
+            if abs(hp_try - wp_try) <= 2:
+                return t_eff, hp_try, wp_try
+
+    raise ValueError(
+        f"Cannot infer patch grid: tokens_total={tokens_total}, T_in={t}. "
+        "T' search did not yield a square/near-square per-frame token grid."
+    )
+
+
+def _time_resample(maps: torch.Tensor, t_in: int) -> torch.Tensor:
+    """Resample maps from (T',H,W) to (T_in,H,W) by nearest index selection."""
+    if maps.ndim != 3:
+        raise ValueError("maps must have shape (T,H,W)")
+    t_eff = int(maps.shape[0])
+    if t_eff == t_in:
+        return maps
+    idx = torch.linspace(0, t_eff - 1, steps=t_in, device=maps.device).round().to(torch.int64)
+    return maps.index_select(0, idx)
 
 
 def _attention_to_map(
@@ -306,6 +338,7 @@ def _attention_to_map(
     if token_importance.numel() != tokens_total:
         token_importance = token_importance[:tokens_total]
 
+    t_in = int(video_tensor.shape[2])
     t, hp, wp = _infer_patch_grid(video_tensor, seq_len_k, has_cls)
     per_frame = hp * wp
     if tokens_total != t * per_frame:
@@ -317,6 +350,7 @@ def _attention_to_map(
     h = int(video_tensor.shape[3])
     w = int(video_tensor.shape[4])
     up = F.interpolate(token_importance.unsqueeze(1), size=(h, w), mode="bilinear", align_corners=False).squeeze(1)
+    up = _time_resample(up, t_in)
 
     # Normalize to [0,1] per-map (global across time)
     up = up - up.min()
@@ -408,12 +442,14 @@ def extract_attention_maps(
         start = 1 if has_cls else 0
         token_importance = attn_vec[start:]
         token_importance = token_importance.reshape(_t, hp, wp)
+        t_in = int(video_tensor.shape[2])
         up = F.interpolate(
             token_importance.unsqueeze(1),  # treat T as batch
             size=(int(video_tensor.shape[3]), int(video_tensor.shape[4])),
             mode="bilinear",
             align_corners=False,
         ).squeeze(1)
+        up = _time_resample(up, t_in)
         up = up - up.min()
         up = up / up.max().clamp_min(1e-8)
         up_np = up.detach().float().cpu().numpy()
