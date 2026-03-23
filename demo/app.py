@@ -80,7 +80,7 @@ def run_attention_tab(
     frame_idx: int,
     head_selection: str,
     use_rollout: bool,
-) -> tuple[np.ndarray | None, np.ndarray | None, np.ndarray | None]:
+    ) -> tuple[np.ndarray | None, np.ndarray | None, np.ndarray | None]:
     try:
         path = coerce_video_path(video_input)
         if not path:
@@ -132,6 +132,7 @@ def run_attention_tab(
 
         return frame, overlay, grid
     except Exception as exc:  # noqa: BLE001
+        logger.exception("Attention tab failed")
         _safe_warning(f"Error: {type(exc).__name__}: {exc}")
         return None, None, None
 
@@ -163,6 +164,7 @@ def run_temporal_tab(
 
         return plot_similarity_heatmap(sim), plot_drift_curve(drift), plot_pca_trajectory(traj)
     except Exception as exc:  # noqa: BLE001
+        logger.exception("Temporal tab failed")
         _safe_warning(f"Error: {type(exc).__name__}: {exc}")
         return None, None, None
 
@@ -195,6 +197,7 @@ def run_retrieval_tab(video_input: Any, k: int) -> tuple[np.ndarray | None, list
         table = [[r["rank"], os.path.basename(r["path"]), r.get("label"), float(r["similarity"])] for r in results]
         return grid, table
     except Exception as exc:  # noqa: BLE001
+        logger.exception("Retrieval tab failed")
         _safe_warning(f"Error: {type(exc).__name__}: {exc}")
         return None, None
 
@@ -244,6 +247,7 @@ def run_masking_tab(
         )
         return grid, md
     except Exception as exc:  # noqa: BLE001
+        logger.exception("Masking tab failed")
         _safe_warning(f"Error: {type(exc).__name__}: {exc}")
         return None, ""
 
@@ -264,7 +268,7 @@ Probing **V-JEPA 2** internal representations through attention maps, embedding 
         with gr.Tabs():
             with gr.Tab("Attention Explorer"):
                 with gr.Row():
-                    video = gr.Video(label="Upload video clip", sources=["upload"])
+                    video = gr.Video(label="Upload video clip", sources=["upload"], type="filepath")
                 with gr.Row():
                     layer = gr.Slider(0, 31, value=31, step=1, label="Encoder layer")
                     frame = gr.Slider(0, 15, value=0, step=1, label="Frame index")
@@ -279,7 +283,7 @@ Probing **V-JEPA 2** internal representations through attention maps, embedding 
                 btn.click(run_attention_tab, inputs=[video, layer, frame, head, rollout], outputs=[out_frame, out_overlay, out_grid])
 
             with gr.Tab("Temporal Drift"):
-                video = gr.Video(label="Upload video clip", sources=["upload"])
+                video = gr.Video(label="Upload video clip", sources=["upload"], type="filepath")
                 with gr.Row():
                     pooling = gr.Radio(["Mean pooling", "Max pooling"], value="Mean pooling", label="Frame pooling")
                     layer = gr.Slider(0, 31, value=31, step=1, label="Encoder layer")
@@ -291,7 +295,7 @@ Probing **V-JEPA 2** internal representations through attention maps, embedding 
                 btn.click(run_temporal_tab, inputs=[video, pooling, layer], outputs=[out_sim, out_drift, out_pca])
 
             with gr.Tab("Nearest Neighbors"):
-                video = gr.Video(label="Upload query video", sources=["upload"])
+                video = gr.Video(label="Upload query video", sources=["upload"], type="filepath")
                 with gr.Row():
                     k = gr.Slider(1, 10, value=5, step=1, label="Number of results")
                     btn = gr.Button("Find similar clips", variant="primary")
@@ -307,7 +311,7 @@ Probing **V-JEPA 2** internal representations through attention maps, embedding 
                     )
 
             with gr.Tab("Masking Strategies"):
-                video = gr.Video(label="Upload video clip", sources=["upload"])
+                video = gr.Video(label="Upload video clip", sources=["upload"], type="filepath")
                 with gr.Row():
                     ratio = gr.Slider(0.5, 0.95, value=0.9, step=0.05, label="Mask ratio")
                     strat = gr.Radio(["Tube masking", "Random masking", "Block masking"], value="Tube masking", label="Strategy")
@@ -325,4 +329,4 @@ Probing **V-JEPA 2** internal representations through attention maps, embedding 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(levelname)s:%(name)s:%(message)s")
     app = build_demo()
-    app.launch(share=False, theme=gr.themes.Soft())
+    app.launch(share=False, theme=gr.themes.Soft(), show_error=True)

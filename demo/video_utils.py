@@ -89,7 +89,12 @@ def coerce_video_path(video_input: Any) -> str:
         return ""
     if isinstance(video_input, str):
         return video_input
-    if isinstance(video_input, dict) and "name" in video_input:
-        return str(video_input["name"])
+    if isinstance(video_input, dict):
+        for key in ("path", "name", "video", "file"):
+            if key in video_input and video_input[key]:
+                return str(video_input[key])
+    if isinstance(video_input, (tuple, list)) and video_input:
+        # Sometimes (path, metadata)
+        if isinstance(video_input[0], str):
+            return video_input[0]
     return str(video_input)
-
