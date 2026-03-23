@@ -1,4 +1,5 @@
 import logging
+import sys
 from collections import defaultdict
 from typing import Any, Literal
 
@@ -96,12 +97,35 @@ def _try_load_hf(
         from transformers import AutoModel  # local import to keep module import light
 
         logger.info("Loading encoder from HuggingFace: %s", model_id)
-        model = AutoModel.from_pretrained(
+        model_raw = AutoModel.from_pretrained(
             model_id,
             trust_remote_code=True,
             torch_dtype=torch_dtype,
             low_cpu_mem_usage=True,
         )
+
+        class _HFEncoderAdapter(nn.Module):
+            def __init__(self, inner: nn.Module) -> None:
+                super().__init__()
+                self.inner = inner
+
+            @property
+            def config(self) -> Any:  # passthrough for _infer_config
+                return getattr(self.inner, "config", None)
+
+            def forward(self, video: torch.Tensor) -> Any:
+                # Our convention: (B, C, T, H, W). HF V-JEPA2 expects pixel_values_videos
+                # shaped (B, T, C, H, W).
+                if video.ndim != 5:
+                    raise ValueError("Expected video tensor shape (B, C, T, H, W)")
+                video_btchw = video.permute(0, 2, 1, 3, 4).contiguous()
+                out = self.inner(pixel_values_videos=video_btchw)
+                # Prefer returning last_hidden_state if present, for downstream interpretability.
+                if hasattr(out, "last_hidden_state"):
+                    return out.last_hidden_state
+                return out
+
+        model = _HFEncoderAdapter(model_raw)
         model.eval()
         model.to(device)
         return model
@@ -111,15 +135,19 @@ def _try_load_hf(
 
 
 def _try_load_torchhub(model_size: ModelSize, device: str, torch_dtype: torch.dtype) -> nn.Module | None:
+    # TorchHub entrypoints documented in facebookresearch/vjepa2 README:
+    #   vjepa2_vit_large / vjepa2_vit_huge / vjepa2_vit_giant / vjepa2_vit_giant_384
     entrypoints: dict[ModelSize, str] = {
-        "vit_h": "vjepa2_vitH",
-        "vit_l": "vjepa2_vitL",
-        "vit_b": "vjepa2_vitB",
+        "vit_b": "vjepa2_vit_large",
+        "vit_l": "vjepa2_vit_huge",
+        "vit_h": "vjepa2_vit_giant",
     }
     entrypoint = entrypoints[model_size]
 
     try:
         logger.info("Loading encoder from TorchHub: %s", entrypoint)
+        # Avoid import collision with our local `src` package name; TorchHub repo uses `src.*`.
+        sys.modules.pop("src", None)
         result = torch.hub.load("facebookresearch/vjepa2", entrypoint)
         if isinstance(result, tuple):
             model, _transforms = result
@@ -130,7 +158,10 @@ def _try_load_torchhub(model_size: ModelSize, device: str, torch_dtype: torch.dt
             raise TypeError(f"TorchHub returned unexpected type: {type(model)}")
 
         model.eval()
-        model.to(device=device, dtype=torch_dtype)
+        if device == "cpu":
+            model.to(device=device, dtype=torch.float32)
+        else:
+            model.to(device=device, dtype=torch_dtype)
         return model
     except Exception as exc:  # noqa: BLE001
         logger.warning("TorchHub load failed for %s. (%s: %s)", entrypoint, type(exc).__name__, exc)
@@ -163,10 +194,12 @@ def load_encoder(
     if resolved_device == "cuda":
         check_vram_budget(model_size)
 
+    # HuggingFace model ids are lowercased (vitl/vith/vitg) and commonly published at 256 resolution.
+    # We map requested sizes to the closest available checkpoints.
     hf_ids: dict[ModelSize, str] = {
-        "vit_h": "facebook/vjepa2-vitH-fpc64-384",
-        "vit_l": "facebook/vjepa2-vitL-fpc64-384",
-        "vit_b": "facebook/vjepa2-vitB-fpc64-384",
+        "vit_b": "facebook/vjepa2-vitl-fpc64-256",
+        "vit_l": "facebook/vjepa2-vith-fpc64-256",
+        "vit_h": "facebook/vjepa2-vitg-fpc64-256",
     }
 
     encoder: nn.Module | None = _try_load_hf(hf_ids[model_size], resolved_device, resolved_dtype)
@@ -320,7 +353,13 @@ def _extract_tensor_from_output(output: Any) -> torch.Tensor:
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(levelname)s:%(name)s:%(message)s")
 
-    enc, cfg = load_encoder(model_size="vit_h", device="auto", dtype="float16")
+    initial_size: ModelSize = "vit_h"
+    resolved_device = _resolve_device("auto")
+    if resolved_device == "cpu":
+        # Avoid pulling the largest checkpoint when CUDA isn't available.
+        initial_size = "vit_b"
+
+    enc, cfg = load_encoder(model_size=initial_size, device="auto", dtype="float16")
     logger.info("Loaded V-JEPA 2 encoder")
     logger.info("  model_size: %s", cfg.get("model_size"))
     logger.info("  embed_dim: %s", cfg.get("embed_dim"))
@@ -328,16 +367,21 @@ if __name__ == "__main__":
     logger.info("  num_layers: %s", cfg.get("num_layers"))
     logger.info("  device: %s", cfg.get("device"))
 
-    dummy = torch.randn(1, 3, 16, 224, 224, device=str(cfg.get("device")), dtype=torch.float16)
-    if str(cfg.get("device")) == "cpu":
-        dummy = dummy.to(dtype=torch.float32)
+    device_used = str(cfg.get("device"))
+    dtype_used = torch.float16 if device_used == "cuda" else torch.float32
+    dummy = torch.randn(1, 3, 16, 224, 224, device=device_used, dtype=dtype_used)
 
     if torch.cuda.is_available() and str(cfg.get("device")) == "cuda":
         torch.cuda.reset_peak_memory_stats()
 
     try:
         with torch.no_grad():
-            out = enc(dummy)
+            try:
+                out = enc(dummy)
+            except Exception:
+                # Some checkpoints expect a fixed number of frames (commonly 64).
+                dummy64 = torch.randn(1, 3, 64, 224, 224, device=device_used, dtype=dtype_used)
+                out = enc(dummy64)
     except torch.cuda.OutOfMemoryError as exc:
         logger.error("CUDA OOM during forward; try model_size='vit_b'.")
         raise
