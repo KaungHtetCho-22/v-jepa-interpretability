@@ -26,6 +26,7 @@ logger = logging.getLogger("vjepa.attention")
 
 META_KEY = "__vjepa_meta__"
 CLS_ATTN_KEY = "__vjepa_cls_attn__"
+SALIENCY_KEY = "__vjepa_saliency__"
 
 
 def _resolve_layer_idx(layer_idx: int, n: int) -> int:
@@ -185,7 +186,7 @@ def _tokens_to_saliency_map(video_tensor: torch.Tensor, tokens: torch.Tensor) ->
 
 def _storage_keys_in_order(hook_storage: dict[str, Any]) -> list[str]:
     # Preserve insertion order (matches forward execution order better than sorting).
-    return [k for k in hook_storage.keys() if k != META_KEY]
+    return [k for k in hook_storage.keys() if k not in (META_KEY, CLS_ATTN_KEY, SALIENCY_KEY)]
 
 
 def _get_layer_attention(
@@ -489,6 +490,7 @@ def extract_attention_maps(
                     raise RuntimeError("Model returned attentions but could not coerce selected layer to a Tensor.")
 
                 sal_map = _tokens_to_saliency_map(video_tensor, tokens)
+                hook_storage[SALIENCY_KEY] = [torch.from_numpy(sal_map)]
                 # Best-effort meta
                 seq_len = int(tokens.shape[1])
                 try:
@@ -578,6 +580,36 @@ def compute_attention_rollout(
         attn_mats.append(attn)
 
     if not attn_mats:
+        # Fallback: if we computed a saliency map (token-norm), reuse it.
+        sal = hook_storage.get(SALIENCY_KEY)
+        if isinstance(sal, list) and sal and isinstance(sal[-1], torch.Tensor):
+            arr = sal[-1].detach().float().cpu().numpy()
+            # Ensure [0,1]
+            arr = arr - arr.min()
+            arr = arr / (arr.max() + 1e-8)
+            return arr.astype(np.float32)
+
+        # Fallback: if we have a CLS attention vector (from qkv path), reshape it.
+        cls_vec_list = hook_storage.get(CLS_ATTN_KEY)
+        if isinstance(cls_vec_list, list) and cls_vec_list and isinstance(cls_vec_list[-1], torch.Tensor):
+            vec = cls_vec_list[-1].detach().float().cpu()
+            has_cls = bool(meta.get("has_cls", False))
+            start = 1 if has_cls else 0
+            t = int(meta["t"])
+            hp = int(meta["hp"])
+            wp = int(meta["wp"])
+            h = int(meta["h"])
+            w = int(meta["w"])
+
+            tok = vec[start:]
+            if tok.numel() != t * hp * wp:
+                raise RuntimeError("CLS attention vector length mismatch; cannot build rollout map.")
+            token_map = tok.reshape(t, hp, wp)
+            up = F.interpolate(token_map.unsqueeze(1), size=(h, w), mode="bilinear", align_corners=False).squeeze(1)
+            up = up - up.min()
+            up = up / up.max().clamp_min(1e-8)
+            return up.numpy().astype(np.float32)
+
         raise RuntimeError("No usable attention matrices found in hook_storage.")
 
     # Use CPU float32 for stability + memory
@@ -699,8 +731,12 @@ if __name__ == "__main__":
     logger.info("Attention map shape: %s", maps.shape)
     logger.info("Value range: [%.3f, %.3f]", float(maps.min()), float(maps.max()))
 
-    rollout = compute_attention_rollout(storage)
-    logger.info("Rollout shape: %s", rollout.shape)
+    try:
+        rollout = compute_attention_rollout(storage)
+        logger.info("Rollout shape: %s", rollout.shape)
+    except Exception as exc:  # noqa: BLE001
+        rollout = None
+        logger.warning("Attention rollout unavailable for this model output (%s: %s)", type(exc).__name__, exc)
 
     # Overlay and save one example
     example = overlay_attention_on_frame(dummy_frames[0], maps[0], alpha=0.5)
