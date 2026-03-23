@@ -1,8 +1,15 @@
 import logging
 import math
+import os
+import sys
 from typing import Any, Literal
 
 import numpy as np
+
+# Allow running as `python src/embeddings.py` (or `uv run src/embeddings.py`)
+_REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
 
 try:
     import torch
