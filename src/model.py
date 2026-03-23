@@ -122,14 +122,17 @@ def _try_load_hf(
             def config(self) -> Any:  # passthrough for _infer_config
                 return getattr(self.inner, "config", None)
 
-            def forward(self, video: torch.Tensor) -> Any:
+            def forward(self, video: torch.Tensor, **kwargs: Any) -> Any:
                 # Our convention: (B, C, T, H, W). HF V-JEPA2 expects pixel_values_videos
                 # shaped (B, T, C, H, W).
                 if video.ndim != 5:
                     raise ValueError("Expected video tensor shape (B, C, T, H, W)")
                 video_btchw = video.permute(0, 2, 1, 3, 4).contiguous()
-                out = self.inner(pixel_values_videos=video_btchw)
-                # Prefer returning last_hidden_state if present, for downstream interpretability.
+                out = self.inner(pixel_values_videos=video_btchw, **kwargs)
+                # By default return a Tensor for downstream interpretability code.
+                # If callers request hidden states/attentions or a dict, return the full output object.
+                if kwargs.get("output_hidden_states") or kwargs.get("output_attentions") or kwargs.get("return_dict"):
+                    return out
                 if hasattr(out, "last_hidden_state"):
                     return out.last_hidden_state
                 return out
