@@ -109,7 +109,7 @@ def _try_load_hf(
         model_raw = AutoModel.from_pretrained(
             model_id,
             trust_remote_code=True,
-            torch_dtype=torch_dtype,
+            dtype=torch_dtype,
             low_cpu_mem_usage=True,
         )
 
