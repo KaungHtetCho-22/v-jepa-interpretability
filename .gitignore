@@ -1,0 +1,21 @@
+# Data / videos
+data/
+assets/*.mp4
+
+# Model weights / checkpoints
+*.pt
+*.pth
+*.bin
+
+# Python artifacts
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+.venv/
+
+# Env files
+.env
+
+# Personal workflow docs (not part of the repo deliverable)
+claude_sessions/
+CONTEXT.md

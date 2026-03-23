@@ -1,0 +1,32 @@
+[project]
+name = "vjepa-interpretability"
+version = "0.1.0"
+description = "Interpretability experiments for V-JEPA 2 (video world model)."
+readme = "SETUP.md"
+requires-python = ">=3.10"
+dependencies = [
+  "transformers>=4.40.0",
+  "gradio>=4.20.0",
+  "decord>=0.6.0",
+  "opencv-python-headless>=4.8.0",
+  "matplotlib>=3.8.0",
+  "scikit-learn>=1.3.0",
+  "einops>=0.7.0",
+  "numpy>=1.26.0",
+  "Pillow>=10.0.0",
+  "huggingface-hub>=0.21.0",
+  "tqdm>=4.66.0",
+]
+
+[project.optional-dependencies]
+torch = [
+  "torch>=2.1.0",
+  "torchvision>=0.16.0",
+]
+
+[build-system]
+requires = ["hatchling>=1.21.0"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src"]
