@@ -39,7 +39,8 @@ def _find_qkv_modules(encoder: nn.Module) -> list[tuple[str, nn.Module, nn.Modul
     modules = dict(encoder.named_modules())
     found: list[tuple[str, nn.Module, nn.Module | None]] = []
     for name, module in modules.items():
-        if name.endswith(".qkv"):
+        # timm-style ViT uses `...attn.qkv`; other variants may use plain `qkv`
+        if name.endswith(".qkv") or name.endswith("qkv"):
             parent = modules.get(name.rsplit(".", 1)[0])
             found.append((name, module, parent))
     return found
@@ -347,6 +348,55 @@ def extract_attention_maps(
         if target_frame is None:
             return up_np.astype(np.float32, copy=False)
         return up_np[int(target_frame)].astype(np.float32, copy=False)
+
+    # Second-best path (HuggingFace models): request attentions explicitly.
+    with torch.no_grad():
+        try:
+            out = encoder(video_tensor, output_attentions=True, return_dict=True)  # type: ignore[call-arg]
+        except TypeError:
+            out = None
+
+    if out is not None:
+        attentions = getattr(out, "attentions", None)
+        if attentions is None and isinstance(out, dict):
+            attentions = out.get("attentions")
+
+        if isinstance(attentions, (tuple, list)) and len(attentions) > 0:
+            # Populate storage so rollout/head viz can reuse
+            for i, a in enumerate(attentions):
+                if isinstance(a, torch.Tensor):
+                    hook_storage[f"attentions.{i}"] = [a.detach()]
+
+            attn = attentions[_resolve_layer_idx(layer_idx, len(attentions))]
+            if not isinstance(attn, torch.Tensor):
+                raise RuntimeError("Model returned attentions but selected layer is not a Tensor.")
+
+            # Save meta
+            if attn.dim() == 4:
+                seq_len = int(attn.shape[-1])
+            else:
+                seq_len = int(attn.shape[-1])
+            t = int(video_tensor.shape[2])
+            if seq_len % t == 0:
+                tokens_per_frame_guess = seq_len // t
+            elif (seq_len - 1) % t == 0:
+                tokens_per_frame_guess = (seq_len - 1) // t
+            else:
+                tokens_per_frame_guess = None
+            has_cls = _has_cls_token(encoder, seq_len, tokens_per_frame_guess)
+            _t, hp, wp = _infer_patch_grid(video_tensor, seq_len, has_cls)
+            hook_storage[META_KEY] = {
+                "t": _t,
+                "h": int(video_tensor.shape[3]),
+                "w": int(video_tensor.shape[4]),
+                "hp": hp,
+                "wp": wp,
+                "has_cls": has_cls,
+                "source": "hf:attentions",
+            }
+
+            attn_map = _attention_to_map(attn, encoder, video_tensor, head_idx=head_idx, target_frame=target_frame)
+            return attn_map.astype(np.float32, copy=False)
 
     # Fallback path: rely on whatever hooks captured.
     with torch.no_grad():
