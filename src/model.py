@@ -1,10 +1,19 @@
 import logging
+import os
 import sys
+from contextlib import contextmanager
 from collections import defaultdict
 from typing import Any, Literal
 
-import torch
-from torch import nn
+try:
+    import torch
+    from torch import nn
+except ModuleNotFoundError as exc:  # pragma: no cover
+    raise ModuleNotFoundError(
+        "PyTorch is not installed. Install it with one of:\n"
+        "  - `uv sync --extra torch` (default wheels)\n"
+        "  - `uv pip install --index-url https://download.pytorch.org/whl/cpu torch torchvision` (CPU-only)\n"
+    ) from exc
 
 logger = logging.getLogger("vjepa.model")
 
@@ -146,9 +155,29 @@ def _try_load_torchhub(model_size: ModelSize, device: str, torch_dtype: torch.dt
 
     try:
         logger.info("Loading encoder from TorchHub: %s", entrypoint)
-        # Avoid import collision with our local `src` package name; TorchHub repo uses `src.*`.
-        sys.modules.pop("src", None)
-        result = torch.hub.load("facebookresearch/vjepa2", entrypoint)
+
+        @contextmanager
+        def _hide_local_src_package() -> Any:
+            # TorchHub repo imports `src.*`. Our project also has `src/`, which can shadow it.
+            # Temporarily remove the repo root from sys.path and clear any already-imported `src`.
+            repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
+            removed: list[str] = []
+            for p in list(sys.path):
+                if p in ("", ".") or os.path.abspath(p) == repo_root:
+                    if p in sys.path:
+                        sys.path.remove(p)
+                        removed.append(p)
+            sys.modules.pop("src", None)
+            try:
+                yield
+            finally:
+                # Restore in front to keep original import behavior
+                for p in reversed(removed):
+                    sys.path.insert(0, p)
+
+        with _hide_local_src_package():
+            result = torch.hub.load("facebookresearch/vjepa2", entrypoint)
+
         if isinstance(result, tuple):
             model, _transforms = result
         else:

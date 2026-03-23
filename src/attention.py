@@ -1,12 +1,18 @@
 import logging
 import math
-from collections import defaultdict
 from typing import Any
 
 import numpy as np
-import torch
-import torch.nn.functional as F
-from torch import nn
+try:
+    import torch
+    import torch.nn.functional as F
+    from torch import nn
+except ModuleNotFoundError as exc:  # pragma: no cover
+    raise ModuleNotFoundError(
+        "PyTorch is not installed. Install it with one of:\n"
+        "  - `uv sync --extra torch` (default wheels)\n"
+        "  - `uv pip install --index-url https://download.pytorch.org/whl/cpu torch torchvision` (CPU-only)\n"
+    ) from exc
 
 logger = logging.getLogger("vjepa.attention")
 
